@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  run-processor:
+    build: .
+    container_name: run-processor-instance
+    volumes:
+      - c:/.run:/app/data
+      - c:/:/mnt/c
+    ports:
+      - "8502:8501"
+    restart: unless-stopped
