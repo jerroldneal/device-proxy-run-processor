@@ -9,8 +9,12 @@ import threading
 # Configuration
 DATA_DIR = "/app/data"
 TODO_DIR = os.path.join(DATA_DIR, "todo")
+TODO_ON_HOST_DIR = os.path.join(DATA_DIR, "todo-on-host")
 WORKING_DIR = os.path.join(DATA_DIR, "working")
 DONE_DIR = os.path.join(DATA_DIR, "done")
+
+# Execution Mode: container (default), mock, host
+RUN_MODE = os.environ.get("RUN_MODE", "host").lower()
 
 # Event to wake up the main loop
 fs_event = threading.Event()
@@ -39,6 +43,15 @@ def execute_file(file_path):
         cmd = ['python', file_path]
     else:
         print(f"Unsupported file type: {ext}")
+        return
+
+    if RUN_MODE == "mock":
+        print(f"[MOCK] Would execute: {' '.join(cmd)}")
+        return
+
+    if RUN_MODE == "host":
+        print(f"[HOST] Host execution not yet implemented. Would execute: {' '.join(cmd)}")
+        # TODO: Implement host execution forwarding
         return
 
     try:
@@ -90,10 +103,11 @@ def get_oldest_file(directory):
         return None
 
 def main():
-    print("Starting Run Processor...")
+    print(f"Starting Run Processor (Mode: {RUN_MODE})...")
 
     # Ensure directories exist
     os.makedirs(TODO_DIR, exist_ok=True)
+    os.makedirs(TODO_ON_HOST_DIR, exist_ok=True)
     os.makedirs(WORKING_DIR, exist_ok=True)
     os.makedirs(DONE_DIR, exist_ok=True)
 
@@ -117,14 +131,24 @@ def main():
             # 2. Check TODO
             todo_file = get_oldest_file(TODO_DIR)
             if todo_file:
-                print(f"Moving {todo_file} to WORKING...")
-                src = os.path.join(TODO_DIR, todo_file)
-                dst = os.path.join(WORKING_DIR, todo_file)
-                try:
-                    shutil.move(src, dst)
-                    continue
-                except Exception as e:
-                    print(f"Error moving file: {e}")
+                if RUN_MODE == "host":
+                    print(f"Moving {todo_file} to TODO_ON_HOST (Host Mode)...")
+                    src = os.path.join(TODO_DIR, todo_file)
+                    dst = os.path.join(TODO_ON_HOST_DIR, todo_file)
+                    try:
+                        shutil.move(src, dst)
+                        continue
+                    except Exception as e:
+                        print(f"Error moving file to host todo: {e}")
+                else:
+                    print(f"Moving {todo_file} to WORKING...")
+                    src = os.path.join(TODO_DIR, todo_file)
+                    dst = os.path.join(WORKING_DIR, todo_file)
+                    try:
+                        shutil.move(src, dst)
+                        continue
+                    except Exception as e:
+                        print(f"Error moving file: {e}")
 
             # 3. Wait for event or timeout
             fs_event.wait(timeout=1.0)

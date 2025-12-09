@@ -34,7 +34,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY processor.py .
 
 # Create data directories
-RUN mkdir -p /app/data/todo /app/data/working /app/data/done
+RUN mkdir -p /app/data/todo /app/data/todo-on-host /app/data/working /app/data/done
 
 # Declare volumes
 VOLUME ["/app/data"]

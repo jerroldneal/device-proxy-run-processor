@@ -84,6 +84,14 @@ Since you can execute shell commands, you have full control over the environment
 * **Node.js** (`.js`)
 * **Python** (`.py`)
 
+### Configuration
+
+You can configure the execution mode by setting the `RUN_MODE` environment variable in the `docker-compose.yml` file.
+
+*   **`host`** (Default): Forwards the request to run directly on the host operating system. Currently moves files to `todo-on-host`.
+*   **`container`**: Executes the command inside the Docker container.
+*   **`mock`**: Logs the command that *would* be executed, but does not run it. Useful for testing and verification.
+
 ### Security Warning
 
 ⚠️ **High Privilege Level:** This service executes code directly on the host (or within the container context depending on volume mounts). It effectively gives the AI agent remote code execution (RCE) capabilities. Ensure this is only running in a trusted environment.
