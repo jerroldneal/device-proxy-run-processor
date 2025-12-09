@@ -1,0 +1,7 @@
+data/todo/*
+data/working/*
+data/done/*
+!data/todo/.gitkeep
+!data/working/.gitkeep
+!data/done/.gitkeep
+data/scripts/test-*.ps1

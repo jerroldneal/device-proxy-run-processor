@@ -2,19 +2,21 @@ import time
 import os
 import shutil
 import subprocess
+import json
+import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import threading
 
 # Configuration
-DATA_DIR = "/app/data"
+# Use local data directory relative to this script
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
 TODO_DIR = os.path.join(DATA_DIR, "todo")
-TODO_ON_HOST_DIR = os.path.join(DATA_DIR, "todo-on-host")
 WORKING_DIR = os.path.join(DATA_DIR, "working")
 DONE_DIR = os.path.join(DATA_DIR, "done")
-
-# Execution Mode: container (default), mock, host
-RUN_MODE = os.environ.get("RUN_MODE", "host").lower()
+SCRIPTS_DIR = os.path.join(DATA_DIR, "scripts")
 
 # Event to wake up the main loop
 fs_event = threading.Event()
@@ -28,69 +30,121 @@ class QueueHandler(FileSystemEventHandler):
         if not event.is_directory:
             fs_event.set()
 
-def execute_file(file_path):
-    print(f"Executing: {file_path}")
-    ext = os.path.splitext(file_path)[1].lower()
+def execute_script(script_path, language):
+    print(f"Executing: {script_path} ({language})")
 
     cmd = []
-    if ext == '.sh':
-        cmd = ['bash', file_path]
-    elif ext == '.ps1':
-        cmd = ['pwsh', file_path]
-    elif ext == '.js':
-        cmd = ['node', file_path]
-    elif ext == '.py':
-        cmd = ['python', file_path]
+    if language == 'powershell' or script_path.endswith('.ps1'):
+        cmd = ['pwsh', script_path]
+    elif language == 'bash' or script_path.endswith('.sh'):
+        cmd = ['bash', script_path]
+    elif language == 'python' or script_path.endswith('.py'):
+        cmd = ['python', script_path]
+    elif language == 'node' or script_path.endswith('.js'):
+        cmd = ['node', script_path]
     else:
-        print(f"Unsupported file type: {ext}")
-        return
-
-    if RUN_MODE == "mock":
-        print(f"[MOCK] Would execute: {' '.join(cmd)}")
-        return
-
-    if RUN_MODE == "host":
-        print(f"[HOST] Host execution not yet implemented. Would execute: {' '.join(cmd)}")
-        # TODO: Implement host execution forwarding
-        return
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": f"Unsupported language/extension: {language} / {script_path}",
+            "exit_code": -1
+        }
 
     try:
-        # Execute the command
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            check=False # Don't raise exception on non-zero exit code
+            check=False
         )
-
-        print("--- STDOUT ---")
-        print(result.stdout)
-        print("--- STDERR ---")
-        print(result.stderr)
-        print(f"Exit Code: {result.returncode}")
-
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.returncode
+        }
     except Exception as e:
-        print(f"Error executing {file_path}: {e}")
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": str(e),
+            "exit_code": -1
+        }
 
-def process_working_item(filename):
+def process_manifest(filename):
     working_path = os.path.join(WORKING_DIR, filename)
-    done_path = os.path.join(DONE_DIR, filename)
+
+    if not os.path.exists(working_path):
+        print(f"Manifest not found: {working_path}")
+        return
 
     try:
-        if not os.path.exists(working_path):
-            return
-
-        execute_file(working_path)
-
-        # Move to done
-        if os.path.exists(working_path):
-            shutil.move(working_path, done_path)
-            print(f"Finished {filename}.")
-        else:
-            print(f"File {filename} no longer in working. Assuming cancelled.")
-
+        with open(working_path, 'r') as f:
+            manifest = json.load(f)
     except Exception as e:
-        print(f"Error processing {filename}: {e}")
+        print(f"Failed to load manifest {filename}: {e}")
+        # Move to done (failed)
+        shutil.move(working_path, os.path.join(DONE_DIR, filename))
+        return
+
+    print(f"Processing Task: {manifest.get('id', 'unknown')} - {manifest.get('goal', 'no goal')}")
+
+    # Resolve Script Path
+    script_ref = manifest.get('script_ref')
+    # script_ref is relative to DATA_DIR (e.g. "scripts/foo.ps1")
+    script_path = os.path.join(DATA_DIR, script_ref)
+
+    if not os.path.exists(script_path):
+        print(f"Script not found: {script_path}")
+        result = {
+            "success": False,
+            "stdout": "",
+            "stderr": f"Script file not found: {script_ref}",
+            "exit_code": -1
+        }
+    else:
+        # Execute
+        result = execute_script(script_path, manifest.get('language'))
+
+    # Update History
+    history_entry = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "attempt": manifest.get('attempt_count', 0) + 1,
+        "script_used": script_ref,
+        "exit_code": result['exit_code'],
+        "stdout": result['stdout'],
+        "stderr": result['stderr'],
+        "verification_failed": False # Placeholder for future logic
+    }
+
+    manifest.setdefault('history', []).append(history_entry)
+    manifest['attempt_count'] = manifest.get('attempt_count', 0) + 1
+
+    if result['success']:
+        manifest['status'] = "COMPLETED"
+        # Save and Move to DONE
+        with open(working_path, 'w') as f:
+            json.dump(manifest, f, indent=2)
+        shutil.move(working_path, os.path.join(DONE_DIR, filename))
+        print(f"Task {manifest['id']} COMPLETED.")
+    else:
+        max_retries = manifest.get('max_retries', 0)
+        current_attempts = manifest.get('attempt_count', 0)
+
+        if current_attempts < max_retries:
+            manifest['status'] = "RETRYING"
+            print(f"Task {manifest['id']} FAILED (Attempt {current_attempts}/{max_retries}). Retrying...")
+            # Save and Keep in WORKING
+            with open(working_path, 'w') as f:
+                json.dump(manifest, f, indent=2)
+            # Optional: Sleep to prevent tight loop if it's the only file
+            time.sleep(2)
+        else:
+            manifest['status'] = "FAILED"
+            print(f"Task {manifest['id']} FAILED (Max retries reached). Moving to DONE.")
+            with open(working_path, 'w') as f:
+                json.dump(manifest, f, indent=2)
+            shutil.move(working_path, os.path.join(DONE_DIR, filename))
 
 def get_oldest_file(directory):
     try:
@@ -103,52 +157,52 @@ def get_oldest_file(directory):
         return None
 
 def main():
-    print(f"Starting Run Processor (Mode: {RUN_MODE})...")
+    print(f"Starting Run Processor V2...")
+    print(f"Data Directory: {DATA_DIR}")
 
     # Ensure directories exist
     os.makedirs(TODO_DIR, exist_ok=True)
-    os.makedirs(TODO_ON_HOST_DIR, exist_ok=True)
     os.makedirs(WORKING_DIR, exist_ok=True)
     os.makedirs(DONE_DIR, exist_ok=True)
+    os.makedirs(SCRIPTS_DIR, exist_ok=True)
 
     # Setup Watchdog
     event_handler = QueueHandler()
     observer = Observer()
     observer.schedule(event_handler, TODO_DIR, recursive=False)
-    observer.schedule(event_handler, WORKING_DIR, recursive=False)
     observer.start()
-    print(f"Monitoring {TODO_DIR} and {WORKING_DIR} for changes...")
+    print(f"Monitoring {TODO_DIR}...")
 
     try:
         while True:
-            # 1. Check WORKING first (Priority)
+            # 1. Check WORKING first (Crash recovery)
             working_file = get_oldest_file(WORKING_DIR)
             if working_file:
-                print(f"Found existing file in WORKING: {working_file}")
-                process_working_item(working_file)
+                if working_file.endswith('.json'):
+                    print(f"Resuming file in WORKING: {working_file}")
+                    process_manifest(working_file)
+                else:
+                    print(f"Ignoring non-json file in WORKING: {working_file}")
                 continue
 
             # 2. Check TODO
             todo_file = get_oldest_file(TODO_DIR)
             if todo_file:
-                if RUN_MODE == "host":
-                    print(f"Moving {todo_file} to TODO_ON_HOST (Host Mode)...")
-                    src = os.path.join(TODO_DIR, todo_file)
-                    dst = os.path.join(TODO_ON_HOST_DIR, todo_file)
-                    try:
-                        shutil.move(src, dst)
-                        continue
-                    except Exception as e:
-                        print(f"Error moving file to host todo: {e}")
-                else:
-                    print(f"Moving {todo_file} to WORKING...")
+                if todo_file.endswith('.json'):
+                    print(f"Picking up {todo_file}...")
                     src = os.path.join(TODO_DIR, todo_file)
                     dst = os.path.join(WORKING_DIR, todo_file)
                     try:
                         shutil.move(src, dst)
+                        # Loop will catch it in WORKING next iteration
                         continue
                     except Exception as e:
                         print(f"Error moving file: {e}")
+                        time.sleep(1)
+                else:
+                    print(f"Ignoring non-json file in TODO: {todo_file}")
+                    # Move to done or delete? For now, ignore.
+                    time.sleep(1)
 
             # 3. Wait for event or timeout
             fs_event.wait(timeout=1.0)
