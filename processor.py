@@ -7,6 +7,7 @@ import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # Configuration
 # Use local data directory relative to this script
@@ -17,6 +18,11 @@ TODO_DIR = os.path.join(DATA_DIR, "todo")
 WORKING_DIR = os.path.join(DATA_DIR, "working")
 DONE_DIR = os.path.join(DATA_DIR, "done")
 SCRIPTS_DIR = os.path.join(DATA_DIR, "scripts")
+
+# Concurrency
+MAX_WORKERS = 5
+active_tasks = set() # Track filenames currently being processed
+active_tasks_lock = threading.Lock()
 
 # Event to wake up the main loop
 fs_event = threading.Event()
@@ -72,6 +78,18 @@ def execute_script(script_path, language):
         }
 
 def process_manifest(filename):
+    with active_tasks_lock:
+        if filename in active_tasks:
+            return
+        active_tasks.add(filename)
+
+    try:
+        _process_manifest_logic(filename)
+    finally:
+        with active_tasks_lock:
+            active_tasks.remove(filename)
+
+def _process_manifest_logic(filename):
     working_path = os.path.join(WORKING_DIR, filename)
 
     if not os.path.exists(working_path):
@@ -146,9 +164,15 @@ def process_manifest(filename):
                 json.dump(manifest, f, indent=2)
             shutil.move(working_path, os.path.join(DONE_DIR, filename))
 
-def get_oldest_file(directory):
+def get_all_working_files(directory):
     try:
-        files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+        return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f)) and f.endswith('.json')]
+    except Exception:
+        return []
+
+def get_oldest_json_file(directory):
+    try:
+        files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f)) and f.endswith('.json')]
         if not files:
             return None
         files.sort(key=lambda x: os.path.getmtime(os.path.join(directory, x)))
@@ -157,7 +181,7 @@ def get_oldest_file(directory):
         return None
 
 def main():
-    print(f"Starting Run Processor V2...")
+    print(f"Starting Run Processor V2 (Concurrent Mode)...")
     print(f"Data Directory: {DATA_DIR}")
 
     # Ensure directories exist
@@ -173,35 +197,31 @@ def main():
     observer.start()
     print(f"Monitoring {TODO_DIR}...")
 
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
     try:
         while True:
-            # 1. Check WORKING first (Crash recovery)
-            working_file = get_oldest_file(WORKING_DIR)
-            if working_file:
-                if working_file.endswith('.json'):
-                    print(f"Resuming file in WORKING: {working_file}")
-                    process_manifest(working_file)
-                else:
-                    print(f"Ignoring non-json file in WORKING: {working_file}")
-                continue
+            # 1. Check WORKING first (Crash recovery & Active tasks)
+            working_files = get_all_working_files(WORKING_DIR)
+            for working_file in working_files:
+                with active_tasks_lock:
+                    if working_file not in active_tasks:
+                        print(f"Submitting existing file in WORKING: {working_file}")
+                        executor.submit(process_manifest, working_file)
 
             # 2. Check TODO
-            todo_file = get_oldest_file(TODO_DIR)
+            todo_file = get_oldest_json_file(TODO_DIR)
             if todo_file:
-                if todo_file.endswith('.json'):
-                    print(f"Picking up {todo_file}...")
-                    src = os.path.join(TODO_DIR, todo_file)
-                    dst = os.path.join(WORKING_DIR, todo_file)
-                    try:
-                        shutil.move(src, dst)
-                        # Loop will catch it in WORKING next iteration
-                        continue
-                    except Exception as e:
-                        print(f"Error moving file: {e}")
-                        time.sleep(1)
-                else:
-                    print(f"Ignoring non-json file in TODO: {todo_file}")
-                    # Move to done or delete? For now, ignore.
+                print(f"Picking up {todo_file}...")
+                src = os.path.join(TODO_DIR, todo_file)
+                dst = os.path.join(WORKING_DIR, todo_file)
+                try:
+                    shutil.move(src, dst)
+                    # Loop will catch it in WORKING next iteration (or immediately if we submit here)
+                    # Better to let the WORKING check handle it to ensure consistency
+                    continue
+                except Exception as e:
+                    print(f"Error moving file: {e}")
                     time.sleep(1)
 
             # 3. Wait for event or timeout
@@ -211,7 +231,7 @@ def main():
     except KeyboardInterrupt:
         print("Stopping...")
         observer.stop()
-
+        executor.shutdown(wait=False)
     observer.join()
 
 if __name__ == "__main__":
