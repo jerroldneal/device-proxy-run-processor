@@ -77,6 +77,20 @@ def execute_script(script_path, language):
             "exit_code": -1
         }
 
+def safe_move(src, dst, retries=5, delay=1.0):
+    for i in range(retries):
+        try:
+            shutil.move(src, dst)
+            return True
+        except (PermissionError, OSError) as e:
+            if i < retries - 1:
+                print(f"Move failed (attempt {i+1}/{retries}): {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                print(f"Move failed permanently: {e}")
+                return False
+    return False
+
 def process_manifest(filename):
     with active_tasks_lock:
         if filename in active_tasks:
@@ -102,7 +116,7 @@ def _process_manifest_logic(filename):
     except Exception as e:
         print(f"Failed to load manifest {filename}: {e}")
         # Move to done (failed)
-        shutil.move(working_path, os.path.join(DONE_DIR, filename))
+        safe_move(working_path, os.path.join(DONE_DIR, filename))
         return
 
     print(f"Processing Task: {manifest.get('id', 'unknown')} - {manifest.get('goal', 'no goal')}")
@@ -143,7 +157,7 @@ def _process_manifest_logic(filename):
         # Save and Move to DONE
         with open(working_path, 'w') as f:
             json.dump(manifest, f, indent=2)
-        shutil.move(working_path, os.path.join(DONE_DIR, filename))
+        safe_move(working_path, os.path.join(DONE_DIR, filename))
         print(f"Task {manifest['id']} COMPLETED.")
     else:
         max_retries = manifest.get('max_retries', 0)
@@ -162,8 +176,7 @@ def _process_manifest_logic(filename):
             print(f"Task {manifest['id']} FAILED (Max retries reached). Moving to DONE.")
             with open(working_path, 'w') as f:
                 json.dump(manifest, f, indent=2)
-            shutil.move(working_path, os.path.join(DONE_DIR, filename))
-
+            safe_move(working_path, os.path.join(DONE_DIR, filename))
 def get_all_working_files(directory):
     try:
         return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f)) and f.endswith('.json')]
@@ -215,13 +228,12 @@ def main():
                 print(f"Picking up {todo_file}...")
                 src = os.path.join(TODO_DIR, todo_file)
                 dst = os.path.join(WORKING_DIR, todo_file)
-                try:
-                    shutil.move(src, dst)
+                if safe_move(src, dst):
                     # Loop will catch it in WORKING next iteration (or immediately if we submit here)
                     # Better to let the WORKING check handle it to ensure consistency
                     continue
-                except Exception as e:
-                    print(f"Error moving file: {e}")
+                else:
+                    print(f"Failed to move {todo_file} to WORKING after retries.")
                     time.sleep(1)
 
             # 3. Wait for event or timeout
