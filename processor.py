@@ -12,12 +12,18 @@ from concurrent.futures import ThreadPoolExecutor
 # Configuration
 # Use local data directory relative to this script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# Allow configuration via environment variable, default to local 'data' folder
+DATA_DIR = os.environ.get('RUN_PROCESSOR_ROOT', os.path.join(BASE_DIR, "data"))
+RUN_MODE = os.environ.get('RUN_MODE', 'host') # 'host' or 'container'
 
 TODO_DIR = os.path.join(DATA_DIR, "todo")
 WORKING_DIR = os.path.join(DATA_DIR, "working")
 DONE_DIR = os.path.join(DATA_DIR, "done")
 SCRIPTS_DIR = os.path.join(DATA_DIR, "scripts")
+
+# Host directories (for forwarding)
+TODO_HOST_DIR = os.path.join(DATA_DIR, "todo-on-host")
+WORKING_HOST_DIR = os.path.join(DATA_DIR, "working-on-host")
 
 # Concurrency
 MAX_WORKERS = 5
@@ -113,10 +119,26 @@ def _process_manifest_logic(filename):
     try:
         with open(working_path, 'r') as f:
             manifest = json.load(f)
+
+        if not isinstance(manifest, dict):
+            raise ValueError("Manifest must be a JSON object")
+
     except Exception as e:
         print(f"Failed to load manifest {filename}: {e}")
         # Move to done (failed)
-        safe_move(working_path, os.path.join(DONE_DIR, filename))
+        dst_path = os.path.join(DONE_DIR, filename)
+
+        # Handle collision in DONE
+        if os.path.exists(dst_path):
+            base, ext = os.path.splitext(filename)
+            dst_path = os.path.join(DONE_DIR, f"{base}_err_{int(time.time())}{ext}")
+
+        if not safe_move(working_path, dst_path):
+            print(f"CRITICAL: Could not move bad manifest {filename} to DONE. Renaming to .bad")
+            try:
+                os.rename(working_path, working_path + ".bad")
+            except Exception as rename_err:
+                print(f"CRITICAL: Could not rename bad manifest {filename}: {rename_err}")
         return
 
     print(f"Processing Task: {manifest.get('id', 'unknown')} - {manifest.get('goal', 'no goal')}")
@@ -203,18 +225,26 @@ def main():
     os.makedirs(DONE_DIR, exist_ok=True)
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
 
+    if RUN_MODE == 'host':
+        os.makedirs(TODO_HOST_DIR, exist_ok=True)
+        os.makedirs(WORKING_HOST_DIR, exist_ok=True)
+
     # Setup Watchdog
     event_handler = QueueHandler()
     observer = Observer()
     observer.schedule(event_handler, TODO_DIR, recursive=False)
     observer.start()
     print(f"Monitoring {TODO_DIR}...")
+    print(f"Run Mode: {RUN_MODE}")
 
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
     try:
         while True:
             # 1. Check WORKING first (Crash recovery & Active tasks)
+            # Only process working files if we are in container mode (or if we want to resume local tasks)
+            # If in host mode, we shouldn't have files in WORKING usually, unless we are processing them locally.
+            # But let's assume we might have some.
             working_files = get_all_working_files(WORKING_DIR)
             for working_file in working_files:
                 with active_tasks_lock:
@@ -227,14 +257,25 @@ def main():
             if todo_file:
                 print(f"Picking up {todo_file}...")
                 src = os.path.join(TODO_DIR, todo_file)
-                dst = os.path.join(WORKING_DIR, todo_file)
-                if safe_move(src, dst):
-                    # Loop will catch it in WORKING next iteration (or immediately if we submit here)
-                    # Better to let the WORKING check handle it to ensure consistency
-                    continue
+
+                if RUN_MODE == 'host':
+                    # Forward to Host
+                    dst = os.path.join(TODO_HOST_DIR, todo_file)
+                    print(f"Forwarding {todo_file} to Host ({dst})...")
+                    if safe_move(src, dst):
+                        continue
+                    else:
+                        print(f"Failed to move {todo_file} to TODO_HOST after retries.")
+                        time.sleep(1)
                 else:
-                    print(f"Failed to move {todo_file} to WORKING after retries.")
-                    time.sleep(1)
+                    # Process Locally (Container)
+                    dst = os.path.join(WORKING_DIR, todo_file)
+                    if safe_move(src, dst):
+                        # Loop will catch it in WORKING next iteration
+                        continue
+                    else:
+                        print(f"Failed to move {todo_file} to WORKING after retries.")
+                        time.sleep(1)
 
             # 3. Wait for event or timeout
             fs_event.wait(timeout=1.0)

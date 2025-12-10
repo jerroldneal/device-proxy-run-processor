@@ -88,9 +88,34 @@ Since you can execute shell commands, you have full control over the environment
 
 You can configure the execution mode by setting the `RUN_MODE` environment variable in the `docker-compose.yml` file.
 
-*   **`host`** (Default): Forwards the request to run directly on the host operating system. Currently moves files to `todo-on-host`.
+*   **`host`** (Default): Forwards the request to run directly on the host operating system. Moves files from `todo` to `todo-on-host`.
 *   **`container`**: Executes the command inside the Docker container.
 *   **`mock`**: Logs the command that *would* be executed, but does not run it. Useful for testing and verification.
+
+You can also configure the root directory using `RUN_PROCESSOR_ROOT`.
+*   Default: `/app/data` (inside container) or `./data` (local).
+*   The structure is:
+    *   `$RUN_PROCESSOR_ROOT/todo`
+    *   `$RUN_PROCESSOR_ROOT/working`
+    *   `$RUN_PROCESSOR_ROOT/done`
+    *   `$RUN_PROCESSOR_ROOT/scripts`
+    *   `$RUN_PROCESSOR_ROOT/todo-on-host` (used in host mode)
+    *   `$RUN_PROCESSOR_ROOT/working-on-host` (used by host processor)
+
+### Running the Host Service
+
+To enable execution on the host machine (Host Mode), you must run the monitor daemon. This script manages the lifecycle of the host pipe service, ensuring it stays running and responsive.
+
+1.  Open a PowerShell terminal as Administrator.
+2.  Navigate to the `pipes/host-pipe/scripts` directory.
+3.  Run the daemon script:
+    ```powershell
+    .\monitor_daemon.ps1
+    ```
+
+This daemon will:
+*   Monitor the health of the host pipe service.
+*   Automatically restart the service if it crashes or becomes unresponsive.
 
 ### Security Warning
 
