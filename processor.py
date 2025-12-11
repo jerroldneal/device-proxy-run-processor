@@ -208,10 +208,21 @@ def get_all_working_files(directory):
 def get_oldest_json_file(directory):
     try:
         files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f)) and f.endswith('.json')]
-        if not files:
+
+        # Filter out 0-byte files to ensure they are fully written
+        valid_files = []
+        for f in files:
+            try:
+                if os.path.getsize(os.path.join(directory, f)) > 0:
+                    valid_files.append(f)
+            except OSError:
+                pass
+
+        if not valid_files:
             return None
-        files.sort(key=lambda x: os.path.getmtime(os.path.join(directory, x)))
-        return files[0]
+
+        valid_files.sort(key=lambda x: os.path.getmtime(os.path.join(directory, x)))
+        return valid_files[0]
     except Exception:
         return None
 
